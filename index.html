@@ -103,6 +103,7 @@
                 this.isPlaying = false;
                 this.currentTime = 0;
                 this.keyframes = {};
+                this.meshToSkin = null; // For storing the specific mesh to be skinned
                 
                 // Camera controls
                 this.cameraDistance = 8;
@@ -123,7 +124,7 @@
                 this.updateCameraPosition();
                 
                 // Lighting
-                const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.5); 
                 this.scene.add(ambientLight);
                 
                 const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -151,7 +152,7 @@
                 this.camera.position.x = this.cameraDistance * Math.sin(this.cameraPhi) * Math.cos(this.cameraTheta);
                 this.camera.position.y = this.cameraDistance * Math.cos(this.cameraPhi);
                 this.camera.position.z = this.cameraDistance * Math.sin(this.cameraPhi) * Math.sin(this.cameraTheta);
-                this.camera.lookAt(0, 1, 0);
+                this.camera.lookAt(0, 1, 0); 
             }
             
             setupEventListeners() {
@@ -191,43 +192,141 @@
             loadModelFile(event) {
                 const file = event.target.files[0];
                 if (!file) return;
-                
+
                 const reader = new FileReader();
+                const extension = file.name.split('.').pop().toLowerCase();
+
                 reader.onload = (e) => {
-                    const contents = e.target.result;
-                    const extension = file.name.split('.').pop().toLowerCase();
+                    const contents = e.target.result; 
                     
+                    if (this.model) {
+                        this.scene.remove(this.model);
+                    }
+                    this.model = null; 
+                    this.clearSkeleton(); 
+
                     if (extension === 'obj') {
                         this.loadOBJFromString(contents);
+                    } else if (extension === 'gltf' || extension === 'glb') {
+                        this.loadGLTF(contents); 
                     } else {
-                        console.log('Unsupported file format. Please use .obj files for now.');
+                        console.warn(`Unsupported file format: .${extension}. Please use .obj, .gltf, or .glb.`);
+                        this.loadDefaultModel(); 
                     }
                 };
-                reader.readAsText(file);
+
+                reader.onerror = (error) => {
+                    console.error("File reading error:", error);
+                    this.loadDefaultModel(); 
+                };
+
+                if (extension === 'glb') {
+                    reader.readAsArrayBuffer(file);
+                } else if (extension === 'obj' || extension === 'gltf') {
+                    reader.readAsText(file);
+                } else {
+                     console.warn(`Unsupported file extension: .${extension} for read method selection. Attempting text read.`);
+                     reader.readAsText(file); 
+                }
+            }
+
+            loadGLTF(data) { 
+                const loader = new THREE.GLTFLoader();
+                try {
+                    loader.parse(data, '', 
+                        (gltf) => { 
+                            this.model = gltf.scene;
+                            
+                            this.model.traverse((node) => {
+                                if (node.isMesh) {
+                                    node.castShadow = true;
+                                    node.receiveShadow = true;
+                                    if (!node.material) {
+                                        node.material = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+                                    } else if (Array.isArray(node.material)) {
+                                        node.material.forEach(m => { if(m) m.needsUpdate = true; });
+                                    } else if (node.material) {
+                                        node.material.needsUpdate = true;
+                                    }
+                                }
+                            });
+
+                            const box = new THREE.Box3().setFromObject(this.model);
+                            const size = box.getSize(new THREE.Vector3());
+                            const desiredHeight = 2.0; 
+                            let scale = 1.0;
+
+                            if (size.y > 0.001) { scale = desiredHeight / size.y; } 
+                            else if (Math.max(size.x, size.z) > 0.001) { scale = desiredHeight / Math.max(size.x, size.z); }
+                            
+                            scale = Math.min(Math.max(scale, 0.01), 100); 
+
+                            this.model.scale.set(scale, scale, scale);
+                            
+                            const scaledBox = new THREE.Box3().setFromObject(this.model);
+                            const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
+                            
+                            this.model.position.x -= scaledCenter.x;
+                            this.model.position.y -= scaledBox.min.y; 
+                            this.model.position.z -= scaledCenter.z;
+
+                            this.scene.add(this.model);
+                            console.log('GLTF model loaded successfully.');
+                        }, 
+                        (error) => { 
+                            console.error('Error parsing GLTF data:', error);
+                            this.loadDefaultModel();
+                        }
+                    );
+                } catch (error) {
+                    console.error('Error initiating GLTF load:', error);
+                    this.loadDefaultModel();
+                }
             }
             
             loadOBJFromString(objString) {
                 try {
                     const loader = new THREE.OBJLoader();
-                    const object = loader.parse(objString);
+                    const objectGroup = loader.parse(objString);
                     
-                    if (this.model) this.scene.remove(this.model);
-                    
-                    // Get first mesh from loaded object
-                    let mesh = null;
-                    object.traverse((child) => {
+                    objectGroup.traverse((child) => {
                         if (child.isMesh) {
-                            mesh = child;
+                            child.castShadow = true;
+                            child.receiveShadow = true;
+                            if (!child.material) {
+                                child.material = new THREE.MeshLambertMaterial({ color: 0x8888ff });
+                            } else if (Array.isArray(child.material)) {
+                                child.material.forEach(m => { if(m) m.needsUpdate = true;});
+                            } else if(child.material) {
+                                child.material.needsUpdate = true;
+                            }
                         }
                     });
                     
-                    if (mesh) {
-                        mesh.material = new THREE.MeshLambertMaterial({ color: 0x8888ff });
-                        mesh.castShadow = true;
-                        mesh.position.y = 0;
-                        this.model = mesh;
-                        this.scene.add(mesh);
-                    }
+                    this.model = objectGroup;
+
+                    const box = new THREE.Box3().setFromObject(this.model);
+                    const size = box.getSize(new THREE.Vector3());
+                    const desiredHeight = 2.0;
+                    let scale = 1.0;
+
+                    if (size.y > 0.001) { scale = desiredHeight / size.y; }
+                    else if (Math.max(size.x, size.z) > 0.001) { scale = desiredHeight / Math.max(size.x, size.z); }
+                    
+                    scale = Math.min(Math.max(scale, 0.01), 100); 
+
+                    this.model.scale.set(scale, scale, scale);
+                        
+                    const scaledBox = new THREE.Box3().setFromObject(this.model);
+                    const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
+                        
+                    this.model.position.x -= scaledCenter.x;
+                    this.model.position.y -= scaledBox.min.y; 
+                    this.model.position.z -= scaledCenter.z;
+
+                    this.scene.add(this.model);
+                    console.log('OBJ model loaded successfully.');
+
                 } catch (error) {
                     console.error('Error loading OBJ:', error);
                     this.loadDefaultModel();
@@ -237,12 +336,14 @@
             loadDefaultModel() {
                 if (this.model) this.scene.remove(this.model);
                 
-                const geometry = new THREE.BoxGeometry(2, 3, 1);
+                const geometry = new THREE.BoxGeometry(2, 3, 1); 
                 const material = new THREE.MeshLambertMaterial({ color: 0x8888ff });
                 this.model = new THREE.Mesh(geometry, material);
-                this.model.position.y = 1.5;
+                this.model.position.y = 1.5; 
                 this.model.castShadow = true;
+                this.model.receiveShadow = true;
                 this.scene.add(this.model);
+                console.log('Loaded default cube model.');
             }
             
             toggleBoneMode() {
@@ -254,18 +355,16 @@
             onClick(event) {
                 if (!this.boneMode || this.controls.mouseDown) return;
                 
-                // Check if clicking on UI elements
-                if (event.target.closest('#ui') || event.target.closest('#timeline')) return;
+                if (event.target !== this.renderer.domElement) return; 
                 
                 this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
                 this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
                 
                 this.raycaster.setFromCamera(this.mouse, this.camera);
                 
-                // Check if clicking on existing bone first
-                const boneIntersects = this.raycaster.intersectObjects(this.bones.map(b => b.mesh));
+                const boneMeshes = this.bones.map(b => b.mesh);
+                const boneIntersects = this.raycaster.intersectObjects(boneMeshes);
                 if (boneIntersects.length > 0) {
-                    // Select bone
                     const boneMesh = boneIntersects[0].object;
                     this.selectedBone = this.bones.find(b => b.mesh === boneMesh);
                     this.highlightBone(this.selectedBone);
@@ -273,24 +372,18 @@
                     return;
                 }
                 
-                // Check if model exists before creating bones
                 if (!this.model) {
                     console.log('Load a model first before creating bones');
                     return;
                 }
                 
-                // Create new bone
-                if (this.selectedBone) {
-                    // Create child bone at camera ray intersection with model
-                    const intersects = this.raycaster.intersectObjects([this.model]);
-                    if (intersects.length > 0) {
-                        this.createBone(intersects[0].point, this.selectedBone);
-                    }
-                } else {
-                    // Create root bone
-                    const intersects = this.raycaster.intersectObjects([this.model]);
-                    if (intersects.length > 0) {
-                        this.createBone(intersects[0].point);
+                const modelIntersects = this.raycaster.intersectObject(this.model, true); 
+                if (modelIntersects.length > 0) {
+                    const intersectPoint = modelIntersects[0].point;
+                    if (this.selectedBone) {
+                        this.createBone(intersectPoint, this.selectedBone);
+                    } else {
+                        this.createBone(intersectPoint);
                     }
                 }
             }
@@ -300,7 +393,8 @@
                 const boneMaterial = new THREE.MeshBasicMaterial({ 
                     color: parent ? 0x00ff00 : 0xff0000,
                     transparent: true,
-                    opacity: 0.8
+                    opacity: 0.8,
+                    depthTest: false 
                 });
                 
                 const boneMesh = new THREE.Mesh(boneGeometry, boneMaterial);
@@ -313,18 +407,16 @@
                     rotation: new THREE.Euler(),
                     parent: parent,
                     children: [],
-                    weights: new Map()
                 };
                 
                 if (parent) {
                     parent.children.push(bone);
                     
-                    // Create bone connection line
                     const lineGeometry = new THREE.BufferGeometry().setFromPoints([
                         parent.position,
                         position
                     ]);
-                    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffff00 });
+                    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffff00, depthTest: false });
                     const line = new THREE.Line(lineGeometry, lineMaterial);
                     this.scene.add(line);
                     bone.connectionLine = line;
@@ -334,38 +426,43 @@
                 this.scene.add(boneMesh);
                 this.updateBoneSelect();
                 this.selectedBone = bone;
-                
-                // Highlight selected bone
                 this.highlightBone(bone);
-                
                 console.log(`Created bone ${bone.id} at`, position);
             }
             
             highlightBone(bone) {
-                // Reset all bone colors
                 this.bones.forEach(b => {
                     b.mesh.material.color.setHex(b.parent ? 0x00ff00 : 0xff0000);
+                    b.mesh.material.opacity = 0.5;
                 });
                 
                 if (bone) {
-                    bone.mesh.material.color.setHex(0xffffff);
+                    bone.mesh.material.color.setHex(0xffffff); 
+                    bone.mesh.material.opacity = 1.0;
                 }
             }
             
             updateBoneSelect() {
                 const select = document.getElementById('boneSelect');
+                const currentVal = select.value;
                 select.innerHTML = '<option value="">Select Bone</option>';
                 this.bones.forEach((bone, i) => {
                     const option = document.createElement('option');
-                    option.value = i;
-                    option.textContent = `Bone ${i} ${bone.parent ? '(Child)' : '(Root)'}`;
-                    if (this.selectedBone === bone) option.selected = true;
+                    option.value = i; 
+                    option.textContent = `Bone ${bone.id} ${bone.parent ? `(Child of ${bone.parent.id})` : '(Root)'}`;
                     select.appendChild(option);
                 });
+
+                if (this.selectedBone) {
+                    const selectedIndex = this.bones.indexOf(this.selectedBone);
+                    if (selectedIndex !== -1) select.value = selectedIndex;
+                } else if (currentVal !== "" && this.bones[parseInt(currentVal)]) {
+                     select.value = currentVal; 
+                }
                 
                 select.onchange = () => {
                     const index = parseInt(select.value);
-                    this.selectedBone = isNaN(index) ? null : this.bones[index];
+                    this.selectedBone = (select.value === "" || isNaN(index)) ? null : this.bones[index];
                     this.highlightBone(this.selectedBone);
                 };
             }
@@ -373,39 +470,50 @@
             deleteBone() {
                 if (!this.selectedBone) return;
                 
-                const bone = this.selectedBone;
+                const boneToDelete = this.selectedBone;
                 
-                // Remove children recursively
-                const removeChildren = (b) => {
+                const bonesToRemove = new Set([boneToDelete]);
+                const gatherChildren = (b) => {
                     b.children.forEach(child => {
-                        removeChildren(child);
-                        this.scene.remove(child.mesh);
-                        if (child.connectionLine) this.scene.remove(child.connectionLine);
-                        const index = this.bones.indexOf(child);
-                        if (index > -1) this.bones.splice(index, 1);
+                        bonesToRemove.add(child);
+                        gatherChildren(child);
                     });
                 };
-                
-                removeChildren(bone);
-                
-                // Remove from scene
-                this.scene.remove(bone.mesh);
-                if (bone.connectionLine) this.scene.remove(bone.connectionLine);
-                
-                // Remove from parent's children
-                if (bone.parent) {
-                    const index = bone.parent.children.indexOf(bone);
-                    if (index > -1) bone.parent.children.splice(index, 1);
+                gatherChildren(boneToDelete);
+
+                bonesToRemove.forEach(b => {
+                    this.scene.remove(b.mesh);
+                    if (b.connectionLine) this.scene.remove(b.connectionLine);
+                    const index = this.bones.indexOf(b);
+                    if (index > -1) this.bones.splice(index, 1);
+                });
+
+                if (boneToDelete.parent) {
+                    const indexInParent = boneToDelete.parent.children.indexOf(boneToDelete);
+                    if (indexInParent > -1) boneToDelete.parent.children.splice(indexInParent, 1);
+                     boneToDelete.children.forEach(child => {
+                        child.parent = boneToDelete.parent;
+                        boneToDelete.parent.children.push(child);
+                        if (child.connectionLine) this.scene.remove(child.connectionLine);
+                        const lineGeom = new THREE.BufferGeometry().setFromPoints([child.parent.position, child.position]);
+                        const lineMat = new THREE.LineBasicMaterial({ color: 0xffff00, depthTest: false });
+                        child.connectionLine = new THREE.Line(lineGeom, lineMat);
+                        this.scene.add(child.connectionLine);
+                    });
+                } else {
+                     boneToDelete.children.forEach(child => {
+                        child.parent = null;
+                        if (child.connectionLine) this.scene.remove(child.connectionLine);
+                        child.connectionLine = null; 
+                        child.mesh.material.color.setHex(0xff0000); 
+                    });
                 }
                 
-                // Remove from bones array
-                const boneIndex = this.bones.indexOf(bone);
-                if (boneIndex > -1) this.bones.splice(boneIndex, 1);
-                
                 this.selectedBone = null;
-                this.updateBoneSelect();
+                this.updateBoneSelect(); 
+                this.highlightBone(null);
                 
-                console.log('Deleted bone and its children');
+                console.log('Deleted bone and managed children.');
             }
             
             clearSkeleton() {
@@ -415,10 +523,16 @@
                 });
                 this.bones = [];
                 this.selectedBone = null;
+                if (this.skeleton) {
+                    if (this.model && this.model.isSkinnedMesh) {
+                        console.log("Skeleton cleared, but model is still a SkinnedMesh. Consider reloading the model.");
+                    }
+                }
                 this.skeleton = null;
+                this.meshToSkin = null;
                 this.updateBoneSelect();
-                
-                console.log('Cleared skeleton');
+                this.highlightBone(null);
+                console.log('Cleared skeleton.');
             }
             
             autoSkin() {
@@ -426,105 +540,165 @@
                     console.log('Need model and bones to auto skin');
                     return;
                 }
+
+                this.meshToSkin = null; 
+                if (this.model.isMesh) {
+                    this.meshToSkin = this.model;
+                } else { 
+                    this.model.traverse((child) => {
+                        if (child.isMesh && !this.meshToSkin) {
+                            this.meshToSkin = child;
+                        }
+                    });
+                }
+
+                if (!this.meshToSkin) {
+                    console.log('No suitable mesh found in the model for skinning.');
+                    return;
+                }
+                if (!this.meshToSkin.geometry) {
+                    console.error("Selected mesh for skinning has no geometry.");
+                    return;
+                }
+                if (!this.meshToSkin.geometry.attributes.position) {
+                    console.error("Mesh geometry is missing position attribute for skinning.");
+                    return;
+                }
+
+                const originalGeometry = this.meshToSkin.geometry;
+                const geometry = originalGeometry.clone(); 
                 
-                const geometry = this.model.geometry;
                 const position = geometry.attributes.position;
                 const skinIndices = [];
                 const skinWeights = [];
                 
-                console.log('Auto skinning with', this.bones.length, 'bones');
+                console.log('Auto skinning with', this.bones.length, 'bones on mesh:', this.meshToSkin.name || 'Unnamed Mesh');
                 
-                // Calculate weights for each vertex
+                this.meshToSkin.updateMatrixWorld(true); 
+
                 for (let i = 0; i < position.count; i++) {
                     const vertex = new THREE.Vector3().fromBufferAttribute(position, i);
-                    vertex.applyMatrix4(this.model.matrixWorld);
+                    vertex.applyMatrix4(this.meshToSkin.matrixWorld); 
                     
                     const weights = this.calculateVertexWeights(vertex);
                     
-                    // Store top 4 influences
                     const sorted = weights.sort((a, b) => b.weight - a.weight).slice(0, 4);
                     while (sorted.length < 4) sorted.push({ boneId: 0, weight: 0 });
                     
-                    // Normalize weights
                     const totalWeight = sorted.reduce((sum, w) => sum + w.weight, 0);
                     if (totalWeight > 0) {
                         sorted.forEach(w => w.weight /= totalWeight);
                     } else {
-                        sorted[0].weight = 1; // Fallback to first bone
+                         if (this.bones.length > 0) {
+                            sorted[0] = { boneId: this.bones[0].id, weight: 1.0 }; 
+                         } else {
+                            sorted[0] = { boneId: 0, weight: 1.0 }; 
+                         }
+                         for(let k=1; k<4; ++k) sorted[k] = { boneId: 0, weight: 0.0 };
                     }
                     
-                    skinIndices.push(sorted[0].boneId, sorted[1].boneId, sorted[2].boneId, sorted[3].boneId);
+                    const boneIndicesForVertex = sorted.map(w => {
+                        const boneActual = this.bones.find(b => b.id === w.boneId);
+                        return boneActual ? this.bones.indexOf(boneActual) : 0; 
+                    });
+
+                    skinIndices.push(boneIndicesForVertex[0], boneIndicesForVertex[1], boneIndicesForVertex[2], boneIndicesForVertex[3]);
                     skinWeights.push(sorted[0].weight, sorted[1].weight, sorted[2].weight, sorted[3].weight);
                 }
                 
-                // Apply skinning
                 geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
                 geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
                 
-                this.createSkinnedMesh();
-                console.log('Auto skinning complete');
+                this.createSkinnedMesh(geometry); 
+                console.log('Auto skinning complete. Skinned mesh created.');
             }
             
-            calculateVertexWeights(vertex) {
+            calculateVertexWeights(vertex) { 
                 const weights = [];
-                
-                this.bones.forEach((bone, i) => {
+                this.bones.forEach(bone => { 
                     const distance = vertex.distanceTo(bone.position);
-                    const influence = Math.max(0, 1 - (distance / 3)); // 3 unit falloff
+                    const influence = Math.max(0, 1 - (distance / 1.5)); 
                     
                     if (influence > 0.01) {
-                        weights.push({ boneId: i, weight: influence });
+                        weights.push({ boneId: bone.id, weight: influence * influence }); 
                     }
                 });
-                
                 return weights;
             }
             
-            createSkinnedMesh() {
-                if (!this.model || this.bones.length === 0) return;
+            createSkinnedMesh(skinnedGeometry) { 
+                if (!this.meshToSkin || !skinnedGeometry || this.bones.length === 0) {
+                     console.error("Cannot create skinned mesh: Requirements not met (meshToSkin, skinnedGeometry, or bones missing).");
+                    return;
+                }
                 
-                // Create THREE.Bone objects
-                const threeBones = this.bones.map(boneData => {
+                const threeBones = [];
+                const boneMap = new Map(); 
+
+                this.bones.forEach(boneData => {
                     const bone = new THREE.Bone();
                     bone.position.copy(boneData.position);
-                    bone.rotation.copy(boneData.rotation);
-                    return bone;
+                    
+                    threeBones.push(bone);
+                    boneMap.set(boneData.id, bone);
                 });
-                
-                // Set up bone hierarchy
+
                 this.bones.forEach((boneData, i) => {
+                    const threeBone = threeBones[i];
                     if (boneData.parent) {
-                        const parentIndex = this.bones.indexOf(boneData.parent);
-                        if (parentIndex >= 0) {
-                            threeBones[parentIndex].add(threeBones[i]);
+                        const parentThreeBone = boneMap.get(boneData.parent.id);
+                        if (parentThreeBone) {
+                            parentThreeBone.add(threeBone);
+                            
+                            const worldPos = boneData.position.clone();
+                            parentThreeBone.updateMatrixWorld(true); 
+                            const localPos = parentThreeBone.worldToLocal(worldPos);
+                            threeBone.position.copy(localPos);
                         }
                     }
                 });
                 
-                // Create skeleton
                 this.skeleton = new THREE.Skeleton(threeBones);
                 
-                // Convert to skinned mesh
-                const geometry = this.model.geometry.clone();
-                const material = this.model.material.clone();
+                let material = this.meshToSkin.material;
+                if (Array.isArray(material)) {
+                    material = material.length > 0 ? material[0].clone() : new THREE.MeshStandardMaterial({color: 0xdddddd});
+                } else if (material) {
+                    material = material.clone();
+                } else {
+                    material = new THREE.MeshStandardMaterial({color: 0xdddddd});
+                }
+                material.skinning = true; 
+
+                const newSkinnedMesh = new THREE.SkinnedMesh(skinnedGeometry, material);
+                newSkinnedMesh.name = (this.meshToSkin.name || "Mesh") + "_skinned";
+
+                newSkinnedMesh.castShadow = true;
+                newSkinnedMesh.receiveShadow = true;
+
+                this.meshToSkin.updateMatrixWorld(true);
+                newSkinnedMesh.applyMatrix4(this.meshToSkin.matrixWorld);
                 
-                const skinnedMesh = new THREE.SkinnedMesh(geometry, material);
-                
-                // Add root bones to the mesh
                 this.bones.forEach((boneData, i) => {
                     if (!boneData.parent) {
-                        skinnedMesh.add(threeBones[i]);
+                        const rootThreeBone = threeBones[i]; 
+                        const worldPos = boneData.position.clone();
+                        newSkinnedMesh.updateMatrixWorld(true);
+                        const localPos = newSkinnedMesh.worldToLocal(worldPos);
+                        rootThreeBone.position.copy(localPos);
+                        newSkinnedMesh.add(rootThreeBone);
                     }
                 });
                 
-                skinnedMesh.bind(this.skeleton);
+                newSkinnedMesh.bind(this.skeleton);
                 
-                // Replace model
-                this.scene.remove(this.model);
-                this.model = skinnedMesh;
-                this.scene.add(skinnedMesh);
+                if (this.model) {
+                    this.scene.remove(this.model); 
+                }
+                this.model = newSkinnedMesh; 
+                this.scene.add(this.model);
                 
-                console.log('Created skinned mesh with', threeBones.length, 'bones');
+                console.log('Created skinned mesh with', this.skeleton.bones.length, 'bones. Model replaced.');
             }
             
             createAnimation() {
@@ -532,61 +706,73 @@
                 
                 this.animations[name] = {
                     name: name,
-                    duration: 2.0,
-                    tracks: {},
-                    keyframes: {}
+                    duration: 2.0, 
+                    tracks: {}, 
+                    keyframes: {} 
                 };
                 
                 this.currentAnim = name;
                 this.updateAnimSelect();
                 document.getElementById('animName').value = '';
                 document.getElementById('currentAnimName').textContent = name;
-                
+                this.updateKeyframeDisplay(); 
                 console.log('Created animation:', name);
             }
             
             updateAnimSelect() {
                 const select = document.getElementById('animSelect');
+                const currentVal = select.value;
                 select.innerHTML = '<option value="">Select Animation</option>';
                 
                 Object.keys(this.animations).forEach(name => {
                     const option = document.createElement('option');
                     option.value = name;
                     option.textContent = name;
-                    if (this.currentAnim === name) option.selected = true;
                     select.appendChild(option);
                 });
+
+                if (this.animations[currentVal]) {
+                     select.value = currentVal; 
+                } else if (this.currentAnim) {
+                    select.value = this.currentAnim;
+                }
                 
                 select.onchange = () => {
                     this.currentAnim = select.value === '' ? null : select.value;
                     document.getElementById('currentAnimName').textContent = this.currentAnim || 'None';
+                    this.currentTime = 0; 
+                    document.getElementById('timeSlider').value = 0;
+                    this.updateAnimation(); 
                     this.updateKeyframeDisplay();
                 };
             }
             
             setKeyframe() {
                 if (!this.currentAnim || this.bones.length === 0) {
-                    console.log('Need animation and bones to set keyframe');
+                    console.log('Select an animation and create bones to set a keyframe.');
+                    return;
+                }
+                if (!this.skeleton) {
+                    console.log("Model is not skinned yet. Auto-skin first.");
                     return;
                 }
                 
                 const anim = this.animations[this.currentAnim];
-                const time = this.currentTime;
+                const time = parseFloat(this.currentTime.toFixed(3)); 
                 
                 if (!anim.keyframes[time]) {
                     anim.keyframes[time] = {};
                 }
                 
-                // Store current bone transforms
-                this.bones.forEach((bone, i) => {
-                    anim.keyframes[time][i] = {
-                        position: bone.position.clone(),
-                        rotation: bone.rotation.clone()
+                this.bones.forEach((boneData, i) => {
+                    anim.keyframes[time][boneData.id] = { 
+                        position: boneData.position.clone(), 
+                        rotation: boneData.rotation.clone()  
                     };
                 });
                 
                 this.updateKeyframeDisplay();
-                console.log('Set keyframe at time', time.toFixed(2));
+                console.log('Set keyframe at time', time.toFixed(2), 'for animation', this.currentAnim);
             }
             
             deleteKeyframe() {
@@ -595,13 +781,12 @@
                 const anim = this.animations[this.currentAnim];
                 const times = Object.keys(anim.keyframes).map(t => parseFloat(t));
                 
-                // Find closest keyframe to current time
                 let closestTime = null;
-                let minDiff = Infinity;
+                let minDiff = 0.01; 
                 
                 times.forEach(time => {
                     const diff = Math.abs(time - this.currentTime);
-                    if (diff < minDiff && diff < 0.1) { // Within 0.1 seconds
+                    if (diff < minDiff) {
                         minDiff = diff;
                         closestTime = time;
                     }
@@ -611,30 +796,44 @@
                     delete anim.keyframes[closestTime];
                     this.updateKeyframeDisplay();
                     console.log('Deleted keyframe at time', closestTime.toFixed(2));
+                } else {
+                    console.log('No keyframe found at current time to delete.');
                 }
             }
             
             updateKeyframeDisplay() {
                 const container = document.getElementById('keyframes');
-                container.innerHTML = '<div id="scrubber"></div>';
-                
-                if (!this.currentAnim) return;
+                const scrubber = document.getElementById('scrubber');
+                container.innerHTML = ''; 
+                if (scrubber) container.appendChild(scrubber);
+                else { 
+                    const newScrubber = document.createElement('div');
+                    newScrubber.id = 'scrubber';
+                    container.appendChild(newScrubber);
+                }
+
+                if (!this.currentAnim || !this.animations[this.currentAnim]) {
+                    this.updateScrubberPosition();
+                    return;
+                }
                 
                 const anim = this.animations[this.currentAnim];
+                const animDuration = anim.duration;
                 const times = Object.keys(anim.keyframes).map(t => parseFloat(t)).sort((a, b) => a - b);
                 
                 times.forEach(time => {
-                    const keyframe = document.createElement('div');
-                    keyframe.className = 'keyframe';
-                    keyframe.style.left = (time / anim.duration * 100) + '%';
-                    keyframe.title = `Keyframe at ${time.toFixed(2)}s`;
-                    keyframe.onclick = (e) => {
-                        e.stopPropagation();
+                    const keyframeEl = document.createElement('div');
+                    keyframeEl.className = 'keyframe';
+                    keyframeEl.style.left = (time / animDuration * 100) + '%';
+                    keyframeEl.title = `Keyframe at ${time.toFixed(2)}s`;
+                    keyframeEl.onclick = (e) => {
+                        e.stopPropagation(); 
                         this.currentTime = time;
-                        document.getElementById('timeSlider').value = time / anim.duration * 100;
-                        this.updateAnimation();
+                        document.getElementById('timeSlider').value = time / animDuration * 100;
+                        this.updateAnimation(); 
+                        this.updateScrubberPosition(); 
                     };
-                    container.appendChild(keyframe);
+                    container.appendChild(keyframeEl);
                 });
                 
                 this.updateScrubberPosition();
@@ -642,17 +841,29 @@
             
             updateScrubberPosition() {
                 const scrubber = document.getElementById('scrubber');
-                if (scrubber && this.currentAnim) {
+                if (scrubber && this.currentAnim && this.animations[this.currentAnim]) {
                     const anim = this.animations[this.currentAnim];
-                    scrubber.style.left = (this.currentTime / anim.duration * 100) + '%';
+                    const percentage = Math.max(0, Math.min(100, (this.currentTime / anim.duration * 100)));
+                    scrubber.style.left = percentage + '%';
+                } else if (scrubber) {
+                    scrubber.style.left = '0%';
                 }
             }
             
             playAnimation() {
-                if (!this.currentAnim) {
-                    console.log('No animation selected');
+                if (!this.currentAnim || !this.animations[this.currentAnim]) {
+                    console.log('No animation selected or defined.');
                     return;
                 }
+                if (Object.keys(this.animations[this.currentAnim].keyframes).length < 1 && this.isPlaying) {
+                    this.pauseAnimation();
+                    return;
+                }
+                 if (Object.keys(this.animations[this.currentAnim].keyframes).length < 1) {
+                    console.log('Add keyframes to play the animation.');
+                    return;
+                }
+
                 this.isPlaying = true;
                 console.log('Playing animation:', this.currentAnim);
                 this.animationLoop();
@@ -664,125 +875,84 @@
             }
             
             animationLoop() {
-                if (!this.isPlaying) return;
-                
-                const anim = this.animations[this.currentAnim];
-                this.currentTime += 0.016; // ~60fps
-                
-                if (this.currentTime >= anim.duration) {
-                    this.currentTime = 0;
+                if (!this.isPlaying || !this.currentAnim || !this.animations[this.currentAnim]) {
+                    this.isPlaying = false; 
+                    return;
                 }
                 
-                document.getElementById('timeSlider').value = this.currentTime / anim.duration * 100;
-                this.updateAnimation();
+                const anim = this.animations[this.currentAnim];
+                this.currentTime += 1/60; 
+                
+                if (this.currentTime > anim.duration) {
+                    this.currentTime = this.currentTime % anim.duration; 
+                }
+                
+                document.getElementById('timeSlider').value = (this.currentTime / anim.duration * 100);
+                this.updateAnimation(); 
                 
                 requestAnimationFrame(() => this.animationLoop());
             }
             
-            updateAnimation() {
-                if (!this.currentAnim || !this.animations[this.currentAnim]) return;
+            updateAnimation() { 
+                if (!this.currentAnim || !this.animations[this.currentAnim] || !this.skeleton) {
+                    document.getElementById('currentTime').textContent = this.currentTime.toFixed(2);
+                    this.updateScrubberPosition();
+                    return; 
+                }
                 
                 const anim = this.animations[this.currentAnim];
-                const times = Object.keys(anim.keyframes).map(t => parseFloat(t)).sort((a, b) => a - b);
+                const keyframeTimes = Object.keys(anim.keyframes).map(t => parseFloat(t)).sort((a, b) => a - b);
                 
-                if (times.length < 1) return;
-                
-                // Update display
                 document.getElementById('currentTime').textContent = this.currentTime.toFixed(2);
                 this.updateScrubberPosition();
-                
-                if (times.length === 1) {
-                    // Only one keyframe, just apply it
-                    const time = times[0];
-                    this.applyKeyframe(anim.keyframes[time]);
+
+                if (keyframeTimes.length === 0) return; 
+
+                if (keyframeTimes.length === 1) {
+                    this.applyKeyframeData(anim.keyframes[keyframeTimes[0]]);
                     return;
                 }
                 
-                // Find surrounding keyframes
-                let prevTime = times[0];
-                let nextTime = times[times.length - 1];
-                
-                for (let i = 0; i < times.length - 1; i++) {
-                    if (this.currentTime >= times[i] && this.currentTime <= times[i + 1]) {
-                        prevTime = times[i];
-                        nextTime = times[i + 1];
-                        break;
+                let prevTime = keyframeTimes[0];
+                let nextTime = keyframeTimes[keyframeTimes.length - 1];
+
+                if (this.currentTime <= keyframeTimes[0]) { 
+                    prevTime = keyframeTimes[0];
+                    nextTime = keyframeTimes[0];
+                } else if (this.currentTime >= keyframeTimes[keyframeTimes.length - 1]) { 
+                    prevTime = keyframeTimes[keyframeTimes.length - 1];
+                    nextTime = keyframeTimes[keyframeTimes.length - 1];
+                } else {
+                    for (let i = 0; i < keyframeTimes.length - 1; i++) {
+                        if (this.currentTime >= keyframeTimes[i] && this.currentTime < keyframeTimes[i + 1]) {
+                            prevTime = keyframeTimes[i];
+                            nextTime = keyframeTimes[i + 1];
+                            break;
+                        }
                     }
                 }
                 
-                // Interpolation factor
-                const t = nextTime === prevTime ? 0 : (this.currentTime - prevTime) / (nextTime - prevTime);
+                const tFactor = (nextTime === prevTime) ? 0 : (this.currentTime - prevTime) / (nextTime - prevTime);
                 
-                // Interpolate bone transforms
-                const prevKeyframe = anim.keyframes[prevTime];
-                const nextKeyframe = anim.keyframes[nextTime];
+                const prevKeyframeData = anim.keyframes[prevTime];
+                const nextKeyframeData = anim.keyframes[nextTime];
                 
-                if (prevKeyframe && nextKeyframe) {
-                    this.interpolateKeyframes(prevKeyframe, nextKeyframe, t);
-                } else if (prevKeyframe) {
-                    this.applyKeyframe(prevKeyframe);
+                if (prevKeyframeData && nextKeyframeData) {
+                    this.interpolateKeyframeData(prevKeyframeData, nextKeyframeData, tFactor);
+                } else if (prevKeyframeData) { 
+                    this.applyKeyframeData(prevKeyframeData);
                 }
             }
             
-            applyKeyframe(keyframe) {
-                this.bones.forEach((bone, i) => {
-                    if (keyframe[i]) {
-                        bone.position.copy(keyframe[i].position);
-                        bone.rotation.copy(keyframe[i].rotation);
-                        
-                        // Update visual bone
-                        bone.mesh.position.copy(bone.position);
-                        bone.mesh.rotation.copy(bone.rotation);
-                        
-                        // Update connection line
-                        if (bone.connectionLine && bone.parent) {
-                            const points = [bone.parent.position, bone.position];
-                            bone.connectionLine.geometry.setFromPoints(points);
-                        }
-                        
-                        // Update THREE.js bone
-                        if (this.skeleton && this.skeleton.bones[i]) {
-                            this.skeleton.bones[i].position.copy(bone.position);
-                            this.skeleton.bones[i].rotation.copy(bone.rotation);
-                        }
+            applyKeyframeData(keyframeData) {
+                this.bones.forEach(boneData => {
+                    const bonePose = keyframeData[boneData.id];
+                    if (bonePose) {
+                        boneData.position
                     }
                 });
             }
-            
-            interpolateKeyframes(prevKeyframe, nextKeyframe, t) {
-                this.bones.forEach((bone, i) => {
-                    const prev = prevKeyframe[i];
-                    const next = nextKeyframe[i];
-                    
-                    if (prev && next) {
-                        // Position interpolation
-                        bone.position.lerpVectors(prev.position, next.position, t);
-                        
-                        // Rotation interpolation
-                        const prevQuat = new THREE.Quaternion().setFromEuler(prev.rotation);
-                        const nextQuat = new THREE.Quaternion().setFromEuler(next.rotation);
-                        const interpQuat = new THREE.Quaternion().slerpQuaternions(prevQuat, nextQuat, t);
-                        bone.rotation.setFromQuaternion(interpQuat);
-                        
-                        // Update visual bone
-                        bone.mesh.position.copy(bone.position);
-                        bone.mesh.rotation.copy(bone.rotation);
-                        
-                        // Update connection line
-                        if (bone.connectionLine && bone.parent) {
-                            const points = [bone.parent.position, bone.position];
-                            bone.connectionLine.geometry.setFromPoints(points);
-                        }
-                        
-                        // Update THREE.js bone
-                        if (this.skeleton && this.skeleton.bones[i]) {
-                            this.skeleton.bones[i].position.copy(bone.position);
-                            this.skeleton.bones[i].rotation.copy(bone.rotation);
-                        }
-                    }
-                });
-            }
-            
+
             onWindowResize() {
                 this.camera.aspect = window.innerWidth / window.innerHeight;
                 this.camera.updateProjectionMatrix();
@@ -803,7 +973,6 @@
                 const deltaX = event.clientX - this.controls.lastMouse.x;
                 const deltaY = event.clientY - this.controls.lastMouse.y;
                 
-                // Orbit camera
                 this.cameraTheta -= deltaX * 0.01;
                 this.cameraPhi += deltaY * 0.01;
                 this.cameraPhi = Math.max(0.1, Math.min(Math.PI - 0.1, this.cameraPhi));
@@ -828,7 +997,6 @@
             onKeyDown(event) {
                 this.controls.keys[event.code] = true;
                 
-                // Shortcut keys
                 if (event.key === ' ') {
                     event.preventDefault();
                     if (this.isPlaying) this.pauseAnimation();
@@ -852,7 +1020,6 @@
             }
         }
         
-        // Global functions for UI
         let rig;
         
         function init() {
@@ -879,7 +1046,6 @@
         function setKeyframe() { rig.setKeyframe(); }
         function deleteKeyframe() { rig.deleteKeyframe(); }
         
-        // Initialize when page loads
         window.onload = init;
     </script>
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
