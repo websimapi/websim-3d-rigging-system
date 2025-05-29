@@ -571,6 +571,34 @@
             }
             
             autoSkin() {
+                if (!this.model || !this.model.isMesh || !this.bones.length) {
+                     if (this.model && !this.model.isMesh && this.model.type === "Group" && this.model.children.length > 0) {
+                        // Try to find the first mesh in the group to skin
+                        let foundMesh = false;
+                        this.model.traverse((node) => {
+                            if (!foundMesh && node.isMesh) {
+                                this.meshToSkin = node;
+                                console.log("Auto-skin will use the first mesh found in the loaded group:", node.name || "[unnamed mesh]");
+                                foundMesh = true;
+                            }
+                        });
+                        if (!this.meshToSkin) {
+                            console.error("No mesh found in the loaded model group to skin.");
+                            this.loadDefaultModel(); // Fallback or error message
+                            return;
+                        }
+                    } else if (!this.model || !this.model.isMesh) {
+                        console.error("Cannot Auto Skin: Load a single mesh model or ensure your model contains a mesh.");
+                        this.loadDefaultModel(); // Fallback or specific error handling
+                        return;
+                    } else {
+                         this.meshToSkin = this.model; // If model itself is a mesh
+                    }
+                } else if (this.model && this.model.isMesh) {
+                     this.meshToSkin = this.model;
+                }
+
+
                 if (!this.meshToSkin || !this.bones.length) {
                      console.error("Cannot create skinned mesh: Requirements not met (meshToSkin or bones missing).");
                     return;
@@ -981,8 +1009,58 @@
                     }
                 });
             }
-            
 
+            highlightBone(boneToHighlight) {
+                this.bones.forEach(b => {
+                    if (b === boneToHighlight) {
+                        b.mesh.material.color.setHex(0xffffff); // Highlighted color (white)
+                    } else {
+                        // Default color based on whether it's a root or child
+                        b.mesh.material.color.setHex(b.parent ? 0x00ff00 : 0xff0000); 
+                    }
+                });
+            }
+
+            updateBoneSelect() {
+                const select = document.getElementById('boneSelect');
+                const currentSelectedValue = select.value; // Preserve current selection if possible
+                select.innerHTML = '<option value="">Select Bone</option>'; // Clear and add default
+                
+                this.bones.forEach((boneData) => {
+                    const option = document.createElement('option');
+                    option.value = boneData.id.toString();
+                    option.textContent = `Bone ${boneData.id} ${boneData.parent ? '(Child)' : '(Root)'}`;
+                    select.appendChild(option);
+                });
+
+                // Attempt to restore previous selection or select the active selectedBone
+                if (this.selectedBone && this.bones.some(b => b.id === this.selectedBone.id)) {
+                    select.value = this.selectedBone.id.toString();
+                } else if (currentSelectedValue && this.bones.some(b => b.id.toString() === currentSelectedValue)) {
+                    select.value = currentSelectedValue;
+                } else {
+                    select.value = ""; // Default to "Select Bone"
+                }
+                
+                select.onchange = () => {
+                    const selectedIdString = select.value;
+                    if (selectedIdString === "") {
+                        this.selectedBone = null;
+                    } else {
+                        const selectedId = parseInt(selectedIdString);
+                        this.selectedBone = this.bones.find(b => b.id === selectedId) || null;
+                    }
+                    
+                    this.highlightBone(this.selectedBone);
+                    
+                    if (!this.boneMode && this.selectedBone) {
+                        this.attachTransformControls(this.selectedBone);
+                    } else {
+                        this.detachTransformControls();
+                    }
+                };
+            }
+            
             onWindowResize() {
                 this.camera.aspect = window.innerWidth / window.innerHeight;
                 this.camera.updateProjectionMatrix();
