@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Rigging System</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; background: #222; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 100; color: white; max-height: calc(100vh - 140px); overflow-y: auto; }
+        .panel { background: rgba(0,0,0,0.8); padding: 10px; margin: 5px; border-radius: 5px; min-width: 200px; }
+        button { margin: 2px; padding: 5px 10px; cursor: pointer; background: #444; color: white; border: 1px solid #666; border-radius: 3px; }
+        button:hover { background: #555; }
+        button:active { background: #333; }
+        input, select { margin: 2px; padding: 3px; background: #333; color: white; border: 1px solid #666; border-radius: 3px; }
+        #timeline { position: absolute; bottom: 10px; left: 10px; right: 10px; height: 100px; background: rgba(0,0,0,0.8); border-radius: 5px; padding: 10px; }
+        #keyframes { position: relative; width: 100%; height: 60px; background: #333; margin-top: 20px; border-radius: 3px; cursor: pointer; }
+        .keyframe { position: absolute; width: 4px; height: 100%; background: #ff6; cursor: pointer; border-radius: 2px; }
+        #scrubber { position: absolute; top: 0; width: 2px; height: 100%; background: #f00; pointer-events: none; z-index: 10; }
+        .info { font-size: 12px; color: #aaa; margin-top: 5px; }
+        #boneInfo { background: rgba(0,100,0,0.3); }
+        #animInfo { background: rgba(100,0,100,0.3); }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="ui">
+            <div class="panel">
+                <h3>Model Controls</h3>
+                <input type="file" id="modelFile" accept=".obj,.fbx,.gltf,.glb">
+                <button onclick="loadDefaultModel()">Load Cube</button>
+                <button onclick="toggleWireframe()">Toggle Wireframe</button>
+                <div class="info">Click and drag to orbit camera<br>Scroll to zoom</div>
+            </div>
+            
+            <div class="panel" id="boneInfo">
+                <h3>Skeleton Tools</h3>
+                <button onclick="toggleBoneMode()">Bone Mode: <span id="boneMode">OFF</span></button>
+                <button onclick="clearSkeleton()">Clear Skeleton</button>
+                <select id="boneSelect"><option>Select Bone</option></select>
+                <button onclick="deleteBone()">Delete Bone</button>
+                <div class="info">
+                    Bone Mode ON: Click on model to create bones<br>
+                    Selected bone creates children when clicked
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h3>Skinning</h3>
+                <button onclick="autoSkin()">Auto Skin</button>
+                <button onclick="paintWeights()">Paint Weights</button>
+                <input type="range" id="brushSize" min="0.1" max="2" step="0.1" value="0.5">
+                <label>Brush Size</label>
+                <div class="info">Auto Skin creates weights based on bone distance</div>
+            </div>
+            
+            <div class="panel" id="animInfo">
+                <h3>Animation</h3>
+                <input type="text" id="animName" placeholder="Animation Name">
+                <button onclick="createAnimation()">Create Anim</button>
+                <select id="animSelect"><option>Select Animation</option></select>
+                <br>
+                <button onclick="playAnimation()">Play</button>
+                <button onclick="pauseAnimation()">Pause</button>
+                <button onclick="setKeyframe()">Set Keyframe</button>
+                <button onclick="deleteKeyframe()">Delete Key</button>
+                <input type="range" id="timeSlider" min="0" max="100" value="0">
+                <div class="info">
+                    1. Create animation<br>
+                    2. Position bones and set keyframes<br>
+                    3. Scrub timeline or play animation
+                </div>
+            </div>
+        </div>
+        
+        <div id="timeline">
+            <div>Timeline: <span id="currentTime">0.00</span>s | Animation: <span id="currentAnimName">None</span></div>
+            <div id="keyframes">
+                <div id="scrubber"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class RiggingSystem {
+            constructor() {
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.raycaster = new THREE.Raycaster();
+                this.mouse = new THREE.Vector2();
+                
+                this.model = null;
+                this.skeleton = null;
+                this.bones = [];
+                this.boneMode = false;
+                this.selectedBone = null;
+                this.animations = {};
+                this.currentAnim = null;
+                this.isPlaying = false;
+                this.currentTime = 0;
+                this.keyframes = {};
+                
+                // Camera controls
+                this.cameraDistance = 8;
+                this.cameraTheta = 0;
+                this.cameraPhi = Math.PI / 4;
+                
+                this.init();
+                this.setupEventListeners();
+            }
+            
+            init() {
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setClearColor(0x333333);
+                this.renderer.shadowMap.enabled = true;
+                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                document.getElementById('container').appendChild(this.renderer.domElement);
+                
+                this.updateCameraPosition();
+                
+                // Lighting
+                const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+                this.scene.add(ambientLight);
+                
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(10, 10, 5);
+                directionalLight.castShadow = true;
+                directionalLight.shadow.mapSize.width = 2048;
+                directionalLight.shadow.mapSize.height = 2048;
+                this.scene.add(directionalLight);
+                
+                // Grid helper
+                const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x444444);
+                this.scene.add(gridHelper);
+                
+                // Controls
+                this.controls = {
+                    keys: {},
+                    mouseDown: false,
+                    lastMouse: { x: 0, y: 0 }
+                };
+                
+                this.animate();
+            }
+            
+            updateCameraPosition() {
+                this.camera.position.x = this.cameraDistance * Math.sin(this.cameraPhi) * Math.cos(this.cameraTheta);
+                this.camera.position.y = this.cameraDistance * Math.cos(this.cameraPhi);
+                this.camera.position.z = this.cameraDistance * Math.sin(this.cameraPhi) * Math.sin(this.cameraTheta);
+                this.camera.lookAt(0, 1, 0);
+            }
+            
+            setupEventListeners() {
+                window.addEventListener('resize', () => this.onWindowResize());
+                this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
+                this.renderer.domElement.addEventListener('mousemove', (e) => this.onMouseMove(e));
+                this.renderer.domElement.addEventListener('mouseup', (e) => this.onMouseUp(e));
+                this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
+                this.renderer.domElement.addEventListener('wheel', (e) => this.onWheel(e));
+                
+                document.addEventListener('keydown', (e) => this.onKeyDown(e));
+                document.addEventListener('keyup', (e) => this.onKeyUp(e));
+                
+                document.getElementById('timeSlider').addEventListener('input', (e) => {
+                    this.currentTime = parseFloat(e.target.value) / 100 * (this.getCurrentAnimDuration());
+                    this.updateAnimation();
+                });
+                
+                // Timeline click
+                document.getElementById('keyframes').addEventListener('click', (e) => {
+                    const rect = e.target.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const percentage = x / rect.width;
+                    this.currentTime = percentage * this.getCurrentAnimDuration();
+                    document.getElementById('timeSlider').value = percentage * 100;
+                    this.updateAnimation();
+                });
+                
+                // Model file loading
+                document.getElementById('modelFile').addEventListener('change', (e) => this.loadModelFile(e));
+            }
+            
+            getCurrentAnimDuration() {
+                return this.currentAnim ? this.animations[this.currentAnim].duration : 2.0;
+            }
+            
+            loadModelFile(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+                
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const contents = e.target.result;
+                    const extension = file.name.split('.').pop().toLowerCase();
+                    
+                    if (extension === 'obj') {
+                        this.loadOBJFromString(contents);
+                    } else {
+                        console.log('Unsupported file format. Please use .obj files for now.');
+                    }
+                };
+                reader.readAsText(file);
+            }
+            
+            loadOBJFromString(objString) {
+                try {
+                    const loader = new THREE.OBJLoader();
+                    const object = loader.parse(objString);
+                    
+                    if (this.model) this.scene.remove(this.model);
+                    
+                    // Get first mesh from loaded object
+                    let mesh = null;
+                    object.traverse((child) => {
+                        if (child.isMesh) {
+                            mesh = child;
+                        }
+                    });
+                    
+                    if (mesh) {
+                        mesh.material = new THREE.MeshLambertMaterial({ color: 0x8888ff });
+                        mesh.castShadow = true;
+                        mesh.position.y = 0;
+                        this.model = mesh;
+                        this.scene.add(mesh);
+                    }
+                } catch (error) {
+                    console.error('Error loading OBJ:', error);
+                    this.loadDefaultModel();
+                }
+            }
+            
+            loadDefaultModel() {
+                if (this.model) this.scene.remove(this.model);
+                
+                const geometry = new THREE.BoxGeometry(2, 3, 1);
+                const material = new THREE.MeshLambertMaterial({ color: 0x8888ff });
+                this.model = new THREE.Mesh(geometry, material);
+                this.model.position.y = 1.5;
+                this.model.castShadow = true;
+                this.scene.add(this.model);
+            }
+            
+            toggleBoneMode() {
+                this.boneMode = !this.boneMode;
+                document.getElementById('boneMode').textContent = this.boneMode ? 'ON' : 'OFF';
+                this.renderer.domElement.style.cursor = this.boneMode ? 'crosshair' : 'default';
+            }
+            
+            onClick(event) {
+                if (!this.boneMode || this.controls.mouseDown) return;
+                
+                this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                
+                this.raycaster.setFromCamera(this.mouse, this.camera);
+                
+                // Check if clicking on existing bone first
+                const boneIntersects = this.raycaster.intersectObjects(this.bones.map(b => b.mesh));
+                if (boneIntersects.length > 0) {
+                    // Select bone
+                    const boneMesh = boneIntersects[0].object;
+                    this.selectedBone = this.bones.find(b => b.mesh === boneMesh);
+                    this.highlightBone(this.selectedBone);
+                    this.updateBoneSelect();
+                    return;
+                }
+                
+                // Create new bone
+                if (this.selectedBone) {
+                    // Create child bone at camera ray intersection with model
+                    const intersects = this.raycaster.intersectObjects([this.model]);
+                    if (intersects.length > 0) {
+                        this.createBone(intersects[0].point, this.selectedBone);
+                    }
+                } else {
+                    // Create root bone
+                    const intersects = this.raycaster.intersectObjects([this.model]);
+                    if (intersects.length > 0) {
+                        this.createBone(intersects[0].point);
+                    }
+                }
+            }
+            
+            createBone(position, parent = null) {
+                const boneGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+                const boneMaterial = new THREE.MeshBasicMaterial({ 
+                    color: parent ? 0x00ff00 : 0xff0000,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                
+                const boneMesh = new THREE.Mesh(boneGeometry, boneMaterial);
+                boneMesh.position.copy(position);
+                
+                const bone = {
+                    id: this.bones.length,
+                    mesh: boneMesh,
+                    position: position.clone(),
+                    rotation: new THREE.Euler(),
+                    parent: parent,
+                    children: [],
+                    weights: new Map()
+                };
+                
+                if (parent) {
+                    parent.children.push(bone);
+                    
+                    // Create bone connection line
+                    const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+                        parent.position,
+                        position
+                    ]);
+                    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffff00 });
+                    const line = new THREE.Line(lineGeometry, lineMaterial);
+                    this.scene.add(line);
+                    bone.connectionLine = line;
+                }
+                
+                this.bones.push(bone);
+                this.scene.add(boneMesh);
+                this.updateBoneSelect();
+                this.selectedBone = bone;
+                
+                // Highlight selected bone
+                this.highlightBone(bone);
+                
+                console.log(`Created bone ${bone.id} at`, position);
+            }
+            
+            highlightBone(bone) {
+                // Reset all bone colors
+                this.bones.forEach(b => {
+                    b.mesh.material.color.setHex(b.parent ? 0x00ff00 : 0xff0000);
+                });
+                
+                if (bone) {
+                    bone.mesh.material.color.setHex(0xffffff);
+                }
+            }
+            
+            updateBoneSelect() {
+                const select = document.getElementById('boneSelect');
+                select.innerHTML = '<option value="">Select Bone</option>';
+                this.bones.forEach((bone, i) => {
+                    const option = document.createElement('option');
+                    option.value = i;
+                    option.textContent = `Bone ${i} ${bone.parent ? '(Child)' : '(Root)'}`;
+                    if (this.selectedBone === bone) option.selected = true;
+                    select.appendChild(option);
+                });
+                
+                select.onchange = () => {
+                    const index = parseInt(select.value);
+                    this.selectedBone = isNaN(index) ? null : this.bones[index];
+                    this.highlightBone(this.selectedBone);
+                };
+            }
+            
+            deleteBone() {
+                if (!this.selectedBone) return;
+                
+                const bone = this.selectedBone;
+                
+                // Remove children recursively
+                const removeChildren = (b) => {
+                    b.children.forEach(child => {
+                        removeChildren(child);
+                        this.scene.remove(child.mesh);
+                        if (child.connectionLine) this.scene.remove(child.connectionLine);
+                        const index = this.bones.indexOf(child);
+                        if (index > -1) this.bones.splice(index, 1);
+                    });
+                };
+                
+                removeChildren(bone);
+                
+                // Remove from scene
+                this.scene.remove(bone.mesh);
+                if (bone.connectionLine) this.scene.remove(bone.connectionLine);
+                
+                // Remove from parent's children
+                if (bone.parent) {
+                    const index = bone.parent.children.indexOf(bone);
+                    if (index > -1) bone.parent.children.splice(index, 1);
+                }
+                
+                // Remove from bones array
+                const boneIndex = this.bones.indexOf(bone);
+                if (boneIndex > -1) this.bones.splice(boneIndex, 1);
+                
+                this.selectedBone = null;
+                this.updateBoneSelect();
+                
+                console.log('Deleted bone and its children');
+            }
+            
+            clearSkeleton() {
+                this.bones.forEach(bone => {
+                    this.scene.remove(bone.mesh);
+                    if (bone.connectionLine) this.scene.remove(bone.connectionLine);
+                });
+                this.bones = [];
+                this.selectedBone = null;
+                this.skeleton = null;
+                this.updateBoneSelect();
+                
+                console.log('Cleared skeleton');
+            }
+            
+            autoSkin() {
+                if (!this.model || this.bones.length === 0) {
+                    console.log('Need model and bones to auto skin');
+                    return;
+                }
+                
+                const geometry = this.model.geometry;
+                const position = geometry.attributes.position;
+                const skinIndices = [];
+                const skinWeights = [];
+                
+                console.log('Auto skinning with', this.bones.length, 'bones');
+                
+                // Calculate weights for each vertex
+                for (let i = 0; i < position.count; i++) {
+                    const vertex = new THREE.Vector3().fromBufferAttribute(position, i);
+                    vertex.applyMatrix4(this.model.matrixWorld);
+                    
+                    const weights = this.calculateVertexWeights(vertex);
+                    
+                    // Store top 4 influences
+                    const sorted = weights.sort((a, b) => b.weight - a.weight).slice(0, 4);
+                    while (sorted.length < 4) sorted.push({ boneId: 0, weight: 0 });
+                    
+                    // Normalize weights
+                    const totalWeight = sorted.reduce((sum, w) => sum + w.weight, 0);
+                    if (totalWeight > 0) {
+                        sorted.forEach(w => w.weight /= totalWeight);
+                    } else {
+                        sorted[0].weight = 1; // Fallback to first bone
+                    }
+                    
+                    skinIndices.push(sorted[0].boneId, sorted[1].boneId, sorted[2].boneId, sorted[3].boneId);
+                    skinWeights.push(sorted[0].weight, sorted[1].weight, sorted[2].weight, sorted[3].weight);
+                }
+                
+                // Apply skinning
+                geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+                geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+                
+                this.createSkinnedMesh();
+                console.log('Auto skinning complete');
+            }
+            
+            calculateVertexWeights(vertex) {
+                const weights = [];
+                
+                this.bones.forEach((bone, i) => {
+                    const distance = vertex.distanceTo(bone.position);
+                    const influence = Math.max(0, 1 - (distance / 3)); // 3 unit falloff
+                    
+                    if (influence > 0.01) {
+                        weights.push({ boneId: i, weight: influence });
+                    }
+                });
+                
+                return weights;
+            }
+            
+            createSkinnedMesh() {
+                if (!this.model || this.bones.length === 0) return;
+                
+                // Create THREE.Bone objects
+                const threeBones = this.bones.map(boneData => {
+                    const bone = new THREE.Bone();
+                    bone.position.copy(boneData.position);
+                    bone.rotation.copy(boneData.rotation);
+                    return bone;
+                });
+                
+                // Set up bone hierarchy
+                this.bones.forEach((boneData, i) => {
+                    if (boneData.parent) {
+                        const parentIndex = this.bones.indexOf(boneData.parent);
+                        if (parentIndex >= 0) {
+                            threeBones[parentIndex].add(threeBones[i]);
+                        }
+                    }
+                });
+                
+                // Create skeleton
+                this.skeleton = new THREE.Skeleton(threeBones);
+                
+                // Convert to skinned mesh
+                const geometry = this.model.geometry.clone();
+                const material = this.model.material.clone();
+                
+                const skinnedMesh = new THREE.SkinnedMesh(geometry, material);
+                
+                // Add root bones to the mesh
+                this.bones.forEach((boneData, i) => {
+                    if (!boneData.parent) {
+                        skinnedMesh.add(threeBones[i]);
+                    }
+                });
+                
+                skinnedMesh.bind(this.skeleton);
+                
+                // Replace model
+                this.scene.remove(this.model);
+                this.model = skinnedMesh;
+                this.scene.add(skinnedMesh);
+                
+                console.log('Created skinned mesh with', threeBones.length, 'bones');
+            }
+            
+            createAnimation() {
+                const name = document.getElementById('animName').value || 'Animation' + Object.keys(this.animations).length;
+                
+                this.animations[name] = {
+                    name: name,
+                    duration: 2.0,
+                    tracks: {},
+                    keyframes: {}
+                };
+                
+                this.currentAnim = name;
+                this.updateAnimSelect();
+                document.getElementById('animName').value = '';
+                document.getElementById('currentAnimName').textContent = name;
+                
+                console.log('Created animation:', name);
+            }
+            
+            updateAnimSelect() {
+                const select = document.getElementById('animSelect');
+                select.innerHTML = '<option value="">Select Animation</option>';
+                
+                Object.keys(this.animations).forEach(name => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    option.textContent = name;
+                    if (this.currentAnim === name) option.selected = true;
+                    select.appendChild(option);
+                });
+                
+                select.onchange = () => {
+                    this.currentAnim = select.value === '' ? null : select.value;
+                    document.getElementById('currentAnimName').textContent = this.currentAnim || 'None';
+                    this.updateKeyframeDisplay();
+                };
+            }
+            
+            setKeyframe() {
+                if (!this.currentAnim || this.bones.length === 0) {
+                    console.log('Need animation and bones to set keyframe');
+                    return;
+                }
+                
+                const anim = this.animations[this.currentAnim];
+                const time = this.currentTime;
+                
+                if (!anim.keyframes[time]) {
+                    anim.keyframes[time] = {};
+                }
+                
+                // Store current bone transforms
+                this.bones.forEach((bone, i) => {
+                    anim.keyframes[time][i] = {
+                        position: bone.position.clone(),
+                        rotation: bone.rotation.clone()
+                    };
+                });
+                
+                this.updateKeyframeDisplay();
+                console.log('Set keyframe at time', time.toFixed(2));
+            }
+            
+            deleteKeyframe() {
+                if (!this.currentAnim) return;
+                
+                const anim = this.animations[this.currentAnim];
+                const times = Object.keys(anim.keyframes).map(t => parseFloat(t));
+                
+                // Find closest keyframe to current time
+                let closestTime = null;
+                let minDiff = Infinity;
+                
+                times.forEach(time => {
+                    const diff = Math.abs(time - this.currentTime);
+                    if (diff < minDiff && diff < 0.1) { // Within 0.1 seconds
+                        minDiff = diff;
+                        closestTime = time;
+                    }
+                });
+                
+                if (closestTime !== null) {
+                    delete anim.keyframes[closestTime];
+                    this.updateKeyframeDisplay();
+                    console.log('Deleted keyframe at time', closestTime.toFixed(2));
+                }
+            }
+            
+            updateKeyframeDisplay() {
+                const container = document.getElementById('keyframes');
+                container.innerHTML = '<div id="scrubber"></div>';
+                
+                if (!this.currentAnim) return;
+                
+                const anim = this.animations[this.currentAnim];
+                const times = Object.keys(anim.keyframes).map(t => parseFloat(t)).sort((a, b) => a - b);
+                
+                times.forEach(time => {
+                    const keyframe = document.createElement('div');
+                    keyframe.className = 'keyframe';
+                    keyframe.style.left = (time / anim.duration * 100) + '%';
+                    keyframe.title = `Keyframe at ${time.toFixed(2)}s`;
+                    keyframe.onclick = (e) => {
+                        e.stopPropagation();
+                        this.currentTime = time;
+                        document.getElementById('timeSlider').value = time / anim.duration * 100;
+                        this.updateAnimation();
+                    };
+                    container.appendChild(keyframe);
+                });
+                
+                this.updateScrubberPosition();
+            }
+            
+            updateScrubberPosition() {
+                const scrubber = document.getElementById('scrubber');
+                if (scrubber && this.currentAnim) {
+                    const anim = this.animations[this.currentAnim];
+                    scrubber.style.left = (this.currentTime / anim.duration * 100) + '%';
+                }
+            }
+            
+            playAnimation() {
+                if (!this.currentAnim) {
+                    console.log('No animation selected');
+                    return;
+                }
+                this.isPlaying = true;
+                console.log('Playing animation:', this.currentAnim);
+                this.animationLoop();
+            }
+            
+            pauseAnimation() {
+                this.isPlaying = false;
+                console.log('Animation paused');
+            }
+            
+            animationLoop() {
+                if (!this.isPlaying) return;
+                
+                const anim = this.animations[this.currentAnim];
+                this.currentTime += 0.016; // ~60fps
+                
+                if (this.currentTime >= anim.duration) {
+                    this.currentTime = 0;
+                }
+                
+                document.getElementById('timeSlider').value = this.currentTime / anim.duration * 100;
+                this.updateAnimation();
+                
+                requestAnimationFrame(() => this.animationLoop());
+            }
+            
+            updateAnimation() {
+                if (!this.currentAnim || !this.animations[this.currentAnim]) return;
+                
+                const anim = this.animations[this.currentAnim];
+                const times = Object.keys(anim.keyframes).map(t => parseFloat(t)).sort((a, b) => a - b);
+                
+                if (times.length < 1) return;
+                
+                // Update display
+                document.getElementById('currentTime').textContent = this.currentTime.toFixed(2);
+                this.updateScrubberPosition();
+                
+                if (times.length === 1) {
+                    // Only one keyframe, just apply it
+                    const time = times[0];
+                    this.applyKeyframe(anim.keyframes[time]);
+                    return;
+                }
+                
+                // Find surrounding keyframes
+                let prevTime = times[0];
+                let nextTime = times[times.length - 1];
+                
+                for (let i = 0; i < times.length - 1; i++) {
+                    if (this.currentTime >= times[i] && this.currentTime <= times[i + 1]) {
+                        prevTime = times[i];
+                        nextTime = times[i + 1];
+                        break;
+                    }
+                }
+                
+                // Interpolation factor
+                const t = nextTime === prevTime ? 0 : (this.currentTime - prevTime) / (nextTime - prevTime);
+                
+                // Interpolate bone transforms
+                const prevKeyframe = anim.keyframes[prevTime];
+                const nextKeyframe = anim.keyframes[nextTime];
+                
+                if (prevKeyframe && nextKeyframe) {
+                    this.interpolateKeyframes(prevKeyframe, nextKeyframe, t);
+                } else if (prevKeyframe) {
+                    this.applyKeyframe(prevKeyframe);
+                }
+            }
+            
+            applyKeyframe(keyframe) {
+                this.bones.forEach((bone, i) => {
+                    if (keyframe[i]) {
+                        bone.position.copy(keyframe[i].position);
+                        bone.rotation.copy(keyframe[i].rotation);
+                        
+                        // Update visual bone
+                        bone.mesh.position.copy(bone.position);
+                        bone.mesh.rotation.copy(bone.rotation);
+                        
+                        // Update connection line
+                        if (bone.connectionLine && bone.parent) {
+                            const points = [bone.parent.position, bone.position];
+                            bone.connectionLine.geometry.setFromPoints(points);
+                        }
+                        
+                        // Update THREE.js bone
+                        if (this.skeleton && this.skeleton.bones[i]) {
+                            this.skeleton.bones[i].position.copy(bone.position);
+                            this.skeleton.bones[i].rotation.copy(bone.rotation);
+                        }
+                    }
+                });
+            }
+            
+            interpolateKeyframes(prevKeyframe, nextKeyframe, t) {
+                this.bones.forEach((bone, i) => {
+                    const prev = prevKeyframe[i];
+                    const next = nextKeyframe[i];
+                    
+                    if (prev && next) {
+                        // Position interpolation
+                        bone.position.lerpVectors(prev.position, next.position, t);
+                        
+                        // Rotation interpolation
+                        const prevQuat = new THREE.Quaternion().setFromEuler(prev.rotation);
+                        const nextQuat = new THREE.Quaternion().setFromEuler(next.rotation);
+                        const interpQuat = new THREE.Quaternion().slerpQuaternions(prevQuat, nextQuat, t);
+                        bone.rotation.setFromQuaternion(interpQuat);
+                        
+                        // Update visual bone
+                        bone.mesh.position.copy(bone.position);
+                        bone.mesh.rotation.copy(bone.rotation);
+                        
+                        // Update connection line
+                        if (bone.connectionLine && bone.parent) {
+                            const points = [bone.parent.position, bone.position];
+                            bone.connectionLine.geometry.setFromPoints(points);
+                        }
+                        
+                        // Update THREE.js bone
+                        if (this.skeleton && this.skeleton.bones[i]) {
+                            this.skeleton.bones[i].position.copy(bone.position);
+                            this.skeleton.bones[i].rotation.copy(bone.rotation);
+                        }
+                    }
+                });
+            }
+            
+            onWindowResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+            
+            onMouseDown(event) {
+                if (event.target.closest('#ui') || event.target.closest('#timeline')) return;
+                
+                this.controls.mouseDown = true;
+                this.controls.lastMouse.x = event.clientX;
+                this.controls.lastMouse.y = event.clientY;
+            }
+            
+            onMouseMove(event) {
+                if (!this.controls.mouseDown) return;
+                
+                const deltaX = event.clientX - this.controls.lastMouse.x;
+                const deltaY = event.clientY - this.controls.lastMouse.y;
+                
+                // Orbit camera
+                this.cameraTheta -= deltaX * 0.01;
+                this.cameraPhi += deltaY * 0.01;
+                this.cameraPhi = Math.max(0.1, Math.min(Math.PI - 0.1, this.cameraPhi));
+                
+                this.updateCameraPosition();
+                
+                this.controls.lastMouse.x = event.clientX;
+                this.controls.lastMouse.y = event.clientY;
+            }
+            
+            onMouseUp(event) {
+                this.controls.mouseDown = false;
+            }
+            
+            onWheel(event) {
+                event.preventDefault();
+                this.cameraDistance += event.deltaY * 0.01;
+                this.cameraDistance = Math.max(2, Math.min(20, this.cameraDistance));
+                this.updateCameraPosition();
+            }
+            
+            onKeyDown(event) {
+                this.controls.keys[event.code] = true;
+                
+                // Shortcut keys
+                if (event.key === ' ') {
+                    event.preventDefault();
+                    if (this.isPlaying) this.pauseAnimation();
+                    else this.playAnimation();
+                }
+                if (event.key === 'k' || event.key === 'K') {
+                    this.setKeyframe();
+                }
+                if (event.key === 'Delete' || event.key === 'Backspace') {
+                    if (this.selectedBone) this.deleteBone();
+                }
+            }
+            
+            onKeyUp(event) {
+                this.controls.keys[event.code] = false;
+            }
+            
+            animate() {
+                requestAnimationFrame(() => this.animate());
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+        
+        // Global functions for UI
+        let rig;
+        
+        function init() {
+            rig = new RiggingSystem();
+            console.log('3D Rigging System initialized');
+        }
+        
+        function loadDefaultModel() { rig.loadDefaultModel(); }
+        function toggleWireframe() { 
+            if (rig.model) {
+                rig.model.material.wireframe = !rig.model.material.wireframe;
+            }
+        }
+        function toggleBoneMode() { rig.toggleBoneMode(); }
+        function clearSkeleton() { rig.clearSkeleton(); }
+        function deleteBone() { rig.deleteBone(); }
+        function autoSkin() { rig.autoSkin(); }
+        function paintWeights() { 
+            console.log('Weight painting mode - Feature coming soon!'); 
+        }
+        function createAnimation() { rig.createAnimation(); }
+        function playAnimation() { rig.playAnimation(); }
+        function pauseAnimation() { rig.pauseAnimation(); }
+        function setKeyframe() { rig.setKeyframe(); }
+        function deleteKeyframe() { rig.deleteKeyframe(); }
+        
+        // Initialize when page loads
+        window.onload = init;
+    </script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+
