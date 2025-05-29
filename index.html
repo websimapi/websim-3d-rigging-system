@@ -37,7 +37,7 @@
         <div id="ui">
             <div class="panel">
                 <h3>Model Controls</h3>
-                <input type="file" id="modelFile" accept=".obj,.fbx,.gltf,.glb">
+                <input type="file" id="modelFile" accept=".obj,.gltf,.glb">
                 <button onclick="loadDefaultModel()">Load Cube</button>
                 <button onclick="toggleWireframe()">Toggle Wireframe</button>
                 <div class="info">Click and drag to orbit camera<br>Scroll to zoom</div>
@@ -50,8 +50,8 @@
                 <select id="boneSelect"><option>Select Bone</option></select>
                 <button onclick="deleteBone()">Delete Bone</button>
                 <div class="info">
-                    Bone Mode ON: Click on model to create bones.<br>
-                    Bone Mode OFF: Click bone to select & transform.
+                    <strong>Bone Mode ON:</strong> Click on model to add new bones. Click an existing bone to select it as the parent for the next bone you create.<br>
+                    <strong>Bone Mode OFF:</strong> Click a bone to select it. The 'Transform Tools' panel below will become active, allowing you to pose the selected bone using on-screen gizmos.
                 </div>
             </div>
 
@@ -59,7 +59,11 @@
                 <h3>Transform Tools</h3>
                 <button id="translateModeButton" onclick="setTransformMode('translate')">Translate</button>
                 <button id="rotateModeButton" onclick="setTransformMode('rotate')">Rotate</button>
-                <div class="info">Use gizmos to move/rotate selected bone (Bone Mode OFF).</div>
+                <div class="info">
+                    Active when 'Bone Mode' is OFF and a bone is selected.<br>
+                    Use the on-screen gizmos (visual handles) to translate or rotate the selected bone.<br>
+                    Click the buttons above to switch between Translate and Rotate gizmos.
+                </div>
             </div>
             
             <div class="panel">
@@ -369,6 +373,7 @@
             
             loadDefaultModel() {
                 if (this.model) this.scene.remove(this.model);
+                this.clearSkeleton(); // Ensure skeleton and controls are reset
                 
                 const geometry = new THREE.BoxGeometry(2, 3, 1); 
                 const material = new THREE.MeshLambertMaterial({ color: 0x8888ff });
@@ -377,7 +382,7 @@
                 this.model.castShadow = true;
                 this.model.receiveShadow = true;
                 this.scene.add(this.model);
-                console.log('Loaded default cube model.');
+                console.log('Loaded default cube model and cleared existing skeleton.');
             }
             
             toggleBoneMode() {
@@ -597,9 +602,6 @@
                     } else { // Model itself is a mesh
                          this.meshToSkin = this.model;
                     }
-                } else if (this.model && this.model.isMesh) {
-                     this.meshToSkin = this.model;
-                }
 
 
                 if (!this.meshToSkin || !this.bones.length) {
