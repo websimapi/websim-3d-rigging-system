@@ -77,6 +77,9 @@
                 <button onclick="createAnimation()">Create Anim</button>
                 <select id="animSelect"><option>Select Animation</option></select>
                 <br>
+                <input type="number" id="animDuration" value="2.0" step="0.1" min="0.1" style="width: 60px;"> <label for="animDuration" style="font-size:12px;">Duration (s)</label>
+                <button onclick="updateAnimationDuration()" style="font-size:12px; padding: 3px 6px;">Set Dur.</button>
+                <br>
                 <button onclick="playAnimation()">Play</button>
                 <button onclick="pauseAnimation()">Pause</button>
                 <button onclick="setKeyframe()">Set Keyframe</button>
@@ -117,6 +120,7 @@
                 this.isPlaying = false;
                 this.currentTime = 0;
                 this.meshToSkin = null; 
+                this.autoSkinInfluenceRadius = 0.5; // Default influence radius for auto-skinning
                 
                 this.cameraDistance = 8;
                 this.cameraTheta = 0;
@@ -216,7 +220,7 @@
             }
             
             getCurrentAnimDuration() {
-                return this.currentAnim ? this.animations[this.currentAnim].duration : 2.0;
+                return (this.currentAnim && this.animations[this.currentAnim]) ? this.animations[this.currentAnim].duration : 2.0;
             }
             
             loadModelFile(event) {
@@ -571,9 +575,8 @@
             }
             
             autoSkin() {
-                if (!this.model || !this.model.isMesh || !this.bones.length) {
+                if (!this.model || this.bones.length === 0) {
                      if (this.model && !this.model.isMesh && this.model.type === "Group" && this.model.children.length > 0) {
-                        // Try to find the first mesh in the group to skin
                         let foundMesh = false;
                         this.model.traverse((node) => {
                             if (!foundMesh && node.isMesh) {
@@ -584,15 +587,15 @@
                         });
                         if (!this.meshToSkin) {
                             console.error("No mesh found in the loaded model group to skin.");
-                            this.loadDefaultModel(); // Fallback or error message
+                            // this.loadDefaultModel(); // Potentially disruptive
                             return;
                         }
                     } else if (!this.model || !this.model.isMesh) {
                         console.error("Cannot Auto Skin: Load a single mesh model or ensure your model contains a mesh.");
-                        this.loadDefaultModel(); // Fallback or specific error handling
+                        // this.loadDefaultModel();
                         return;
-                    } else {
-                         this.meshToSkin = this.model; // If model itself is a mesh
+                    } else { // Model itself is a mesh
+                         this.meshToSkin = this.model;
                     }
                 } else if (this.model && this.model.isMesh) {
                      this.meshToSkin = this.model;
@@ -603,36 +606,71 @@
                      console.error("Cannot create skinned mesh: Requirements not met (meshToSkin or bones missing).");
                     return;
                 }
-                this.detachTransformControls(); 
-                
+                this.detachTransformControls();
+
+                // 1. Calculate Skinning Weights and Indices for the geometry
+                const originalGeometry = this.meshToSkin.geometry;
+                const skinnedGeometry = originalGeometry.clone(); // Work on a clone
+
+                const positionAttribute = skinnedGeometry.attributes.position;
+                const numVertices = positionAttribute.count;
+                const skinIndices = [];
+                const skinWeights = [];
+
+                const vertex = new THREE.Vector3();
+                this.meshToSkin.updateMatrixWorld(true); // Ensure matrixWorld is up-to-date
+                const meshWorldMatrix = this.meshToSkin.matrixWorld;
+
+                // Determine a dynamic influence radius based on model size or use a default
+                // For now, use class property autoSkinInfluenceRadius, which could be set based on model bounds later
+                const modelBox = new THREE.Box3().setFromObject(this.meshToSkin);
+                const modelSize = modelBox.getSize(new THREE.Vector3());
+                const adaptiveInfluenceRadius = Math.max(modelSize.x, modelSize.y, modelSize.z) * 0.25; // e.g., 25% of max dimension
+                const influenceRadius = adaptiveInfluenceRadius > 0.01 ? adaptiveInfluenceRadius : this.autoSkinInfluenceRadius;
+                console.log("Using influence radius for auto-skinning:", influenceRadius.toFixed(3));
+
+
+                for (let i = 0; i < numVertices; i++) {
+                    vertex.fromBufferAttribute(positionAttribute, i);
+                    vertex.applyMatrix4(meshWorldMatrix); // Transform vertex to world space
+
+                    const calculatedWeights = this.calculateVertexWeights(vertex, this.bones, influenceRadius); 
+                    
+                    calculatedWeights.forEach(w => {
+                        skinIndices.push(w.boneIndex);
+                        skinWeights.push(w.weight);
+                    });
+                }
+
+                skinnedGeometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+                skinnedGeometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+
+                // 2. Create THREE.Bone objects
                 const threeBones = [];
                 const boneMap = new Map(); 
 
-                this.bones.forEach(boneData => {
+                this.bones.forEach(boneData => { // boneData.mesh.position/quaternion are world space
                     const bone = new THREE.Bone();
-                    bone.position.copy(boneData.mesh.position);
-                    bone.quaternion.copy(boneData.mesh.quaternion);
+                    // Bone's initial position/quaternion will be set relative to parent / SkinnedMesh later
                     threeBones.push(bone);
                     boneMap.set(boneData.id, bone);
                 });
 
+                // 3. Parent THREE.Bone objects correctly based on visual bone hierarchy
                 this.bones.forEach((boneData, i) => {
                     const threeBone = threeBones[i];
                     if (boneData.parent) {
                         const parentThreeBone = boneMap.get(boneData.parent.id);
                         if (parentThreeBone) {
                             parentThreeBone.add(threeBone);
-                            parentThreeBone.updateMatrixWorld(true); 
-                            const parentInverse = new THREE.Matrix4().copy(parentThreeBone.matrixWorld).invert();
-                            const childWorldMatrix = new THREE.Matrix4().compose(boneData.mesh.position, boneData.mesh.quaternion, boneData.mesh.scale);
-                            threeBone.matrix.multiplyMatrices(parentInverse, childWorldMatrix);
-                            threeBone.matrix.decompose(threeBone.position, threeBone.quaternion, threeBone.scale);
                         }
                     }
                 });
                 
+                // 4. Create Skeleton
                 this.skeleton = new THREE.Skeleton(threeBones);
                 
+                // 5. Create SkinnedMesh
                 let material = this.meshToSkin.material;
                 if (Array.isArray(material)) {
                     material = material.length > 0 ? material[0].clone() : new THREE.MeshStandardMaterial({color: 0xdddddd});
@@ -642,57 +680,85 @@
                     material = new THREE.MeshStandardMaterial({color: 0xdddddd});
                 }
                 material.skinning = true; 
+                material.needsUpdate = true; // Ensure material updates
 
-                const newSkinnedMesh = new THREE.SkinnedMesh(this.meshToSkin.geometry, material);
+                const newSkinnedMesh = new THREE.SkinnedMesh(skinnedGeometry, material); // Use the new geometry
                 newSkinnedMesh.name = (this.meshToSkin.name || "Mesh") + "_skinned";
 
                 newSkinnedMesh.castShadow = true;
                 newSkinnedMesh.receiveShadow = true;
+                
+                // Match transform of the original mesh
+                newSkinnedMesh.applyMatrix4(this.meshToSkin.matrixWorld); 
+                // After applying world matrix, reset SkinnedMesh's local transform to identity if it's added directly to scene
+                // Or, if it's parented, its local transform should be relative to that parent.
+                // For simplicity, assume it's added to scene origin for now, then its matrix reflects the original world matrix.
+                // Let's ensure its position/rotation/scale are set from its matrixWorld.
+                newSkinnedMesh.matrixAutoUpdate = false; // Since we set matrixWorld via applyMatrix4
+                newSkinnedMesh.matrix.copy(this.meshToSkin.matrixWorld);
+                newSkinnedMesh.matrix.decompose(newSkinnedMesh.position, newSkinnedMesh.quaternion, newSkinnedMesh.scale);
+                newSkinnedMesh.matrixAutoUpdate = true;
 
-                this.meshToSkin.updateMatrixWorld(true);
-                newSkinnedMesh.applyMatrix4(this.meshToSkin.matrixWorld);
-                
+
+                // 6. Add root THREE.Bones to SkinnedMesh and set their initial local transforms
                 this.bones.forEach((boneData, i) => {
-                    if (!boneData.parent) {
-                        const rootThreeBone = threeBones[i]; 
-                        const worldPos = boneData.mesh.position.clone();
-                        newSkinnedMesh.updateMatrixWorld(true);
-                        const localPos = newSkinnedMesh.worldToLocal(worldPos);
-                        rootThreeBone.position.copy(localPos);
-                        newSkinnedMesh.add(rootThreeBone);
+                    const threeBone = threeBones[i];
+                    // Set initial local transform of THREE.Bone based on its world pos/quat (from boneData.mesh)
+                    // relative to its parent THREE.Bone or the SkinnedMesh if it's a root.
+                    const boneWorldMatrix = new THREE.Matrix4().compose(boneData.mesh.position, boneData.mesh.quaternion, boneData.mesh.scale);
+                    
+                    if (boneData.parent) {
+                        const parentThreeBone = boneMap.get(boneData.parent.id);
+                        if (parentThreeBone) {
+                            parentThreeBone.updateMatrixWorld(true); // Ensure parent's world matrix is current
+                            const parentInverseWorld = new THREE.Matrix4().copy(parentThreeBone.matrixWorld).invert();
+                            threeBone.matrix.multiplyMatrices(parentInverseWorld, boneWorldMatrix);
+                        }
+                    } else { // Root bone
+                        newSkinnedMesh.add(threeBone); // Add root THREE.Bone to SkinnedMesh
+                        newSkinnedMesh.updateMatrixWorld(true); // Ensure SkinnedMesh's world matrix is current
+                        const skinnedMeshInverseWorld = new THREE.Matrix4().copy(newSkinnedMesh.matrixWorld).invert();
+                        threeBone.matrix.multiplyMatrices(skinnedMeshInverseWorld, boneWorldMatrix);
                     }
+                    threeBone.matrix.decompose(threeBone.position, threeBone.quaternion, threeBone.scale);
                 });
-                
+
+                // 7. Bind skeleton to SkinnedMesh
                 newSkinnedMesh.bind(this.skeleton);
                 
-                if (this.model) {
-                    this.scene.remove(this.model); 
+                // 8. Replace old model with new SkinnedMesh
+                if (this.model && this.model !== this.meshToSkin) { // If model was a group
+                    this.model.remove(this.meshToSkin); // Remove original mesh from group
+                    this.model.add(newSkinnedMesh); // Add skinned mesh to group
+                    // TODO: Handle transform hierarchy if meshToSkin was deep within a group.
+                    // For now, assuming meshToSkin's world transform is what newSkinnedMesh should adopt.
+                } else if (this.model === this.meshToSkin) { // if model was the mesh itself
+                    this.scene.remove(this.model);
+                    this.model = newSkinnedMesh;
+                    this.scene.add(this.model);
+                } else { // Fallback, direct add
+                    this.scene.remove(this.meshToSkin); // remove the original mesh component if it was added separately
+                    if(this.model) this.scene.remove(this.model); // remove old model object if any
+                    this.model = newSkinnedMesh; // assign new skinned mesh as the current model
+                    this.scene.add(this.model);
                 }
-                this.model = newSkinnedMesh; 
-                this.scene.add(this.model);
-
-                this.bones.forEach(boneData => {
-                    if (!boneData.parent) {
-                        const rootThreeBone = boneMap.get(boneData.id);
-                        if (rootThreeBone && newSkinnedMesh.children.includes(rootThreeBone)) { 
-                            newSkinnedMesh.updateMatrixWorld(true); 
-                            const modelInverse = new THREE.Matrix4().copy(newSkinnedMesh.matrixWorld).invert();
-                            const childWorldMatrix = new THREE.Matrix4().compose(boneData.mesh.position, boneData.mesh.quaternion, boneData.mesh.scale);
-                            rootThreeBone.matrix.multiplyMatrices(modelInverse, childWorldMatrix);
-                            rootThreeBone.matrix.decompose(rootThreeBone.position, rootThreeBone.quaternion, rootThreeBone.scale);
-                        }
-                    }
-                });
+                this.meshToSkin = newSkinnedMesh; // The new skinned mesh is now the target for further operations if any
                 
-                console.log('Created skinned mesh with', this.skeleton.bones.length, 'bones. Model replaced.');
+                console.log('Created skinned mesh with', this.skeleton.bones.length, 'bones and applied skin weights.');
             }
             
             createAnimation() {
                 const name = document.getElementById('animName').value || 'Animation' + Object.keys(this.animations).length;
+                const duration = parseFloat(document.getElementById('animDuration').value);
+
+                if (isNaN(duration) || duration <= 0) {
+                    console.warn("Invalid animation duration, defaulting to 2.0s");
+                    document.getElementById('animDuration').value = "2.0";
+                }
                 
                 this.animations[name] = {
                     name: name,
-                    duration: 2.0, 
+                    duration: (isNaN(duration) || duration <= 0) ? 2.0 : duration, 
                     tracks: {}, 
                     keyframes: {} 
                 };
@@ -726,6 +792,11 @@
                 select.onchange = () => {
                     this.currentAnim = select.value === '' ? null : select.value;
                     document.getElementById('currentAnimName').textContent = this.currentAnim || 'None';
+                    if (this.currentAnim && this.animations[this.currentAnim]) {
+                        document.getElementById('animDuration').value = this.animations[this.currentAnim].duration.toFixed(1);
+                    } else if (!this.currentAnim) {
+                        document.getElementById('animDuration').value = "2.0"; // Default if no anim selected
+                    }
                     this.currentTime = 0; 
                     document.getElementById('timeSlider').value = 0;
                     this.updateAnimation(); 
@@ -825,7 +896,8 @@
                 const scrubber = document.getElementById('scrubber');
                 if (scrubber && this.currentAnim && this.animations[this.currentAnim]) {
                     const anim = this.animations[this.currentAnim];
-                    const percentage = Math.max(0, Math.min(100, (this.currentTime / anim.duration * 100)));
+                    const animDuration = anim.duration > 0 ? anim.duration : 0.001; // Avoid division by zero
+                    const percentage = Math.max(0, Math.min(100, (this.currentTime / animDuration * 100)));
                     scrubber.style.left = percentage + '%';
                 } else if (scrubber) {
                     scrubber.style.left = '0%';
@@ -841,7 +913,8 @@
                     this.pauseAnimation();
                     return;
                 }
-                 if (Object.keys(this.animations[this.currentAnim].keyframes).length < 1) {
+
+                if (Object.keys(this.animations[this.currentAnim].keyframes).length < 1) {
                     console.log('Add keyframes to play the animation.');
                     return;
                 }
@@ -867,9 +940,13 @@
                 
                 if (this.currentTime > anim.duration) {
                     this.currentTime = this.currentTime % anim.duration; 
+                    if (Object.keys(anim.keyframes).length <= 1) { // If only one or zero keyframes, pause to avoid rapid loop
+                        this.pauseAnimation();
+                        this.currentTime = 0; // Reset to start
+                    }
                 }
                 
-                document.getElementById('timeSlider').value = (this.currentTime / anim.duration * 100);
+                document.getElementById('timeSlider').value = (this.currentTime / (anim.duration > 0 ? anim.duration : 1) * 100);
                 this.updateAnimation(); 
                 
                 requestAnimationFrame(() => this.animationLoop());
@@ -1164,6 +1241,80 @@
                 document.getElementById('timeline').classList.toggle('ui-hidden', !this.uiVisible);
                 document.getElementById('toggleUiButton').textContent = this.uiVisible ? 'Hide UI' : 'Show UI';
             }
+
+            calculateVertexWeights(vertexWorldPos, bones, influenceRadius) {
+                const weights = [];
+                if (bones.length === 0) {
+                    return [{ boneIndex: 0, weight: 1.0 }]; // Fallback if no bones
+                }
+
+                bones.forEach((boneData, boneIdx) => {
+                    const boneWorldPos = boneData.mesh.position;
+                    const distance = vertexWorldPos.distanceTo(boneWorldPos);
+                    
+                    let weight = Math.max(0, 1.0 - (distance / influenceRadius));
+                    weight = weight * weight * weight; // Sharper falloff (cubic)
+
+                    if (weight > 0.0001) { // Increased precision for weight check
+                        weights.push({ boneIndex: boneIdx, weight: weight });
+                    }
+                });
+
+                weights.sort((a, b) => b.weight - a.weight);
+                const topWeights = weights.slice(0, 4);
+                
+                let totalWeight = 0;
+                topWeights.forEach(w => totalWeight += w.weight);
+
+                if (totalWeight > 0.00001) { // Check against small epsilon
+                    topWeights.forEach(w => w.weight /= totalWeight);
+                } else { // Fallback if all weights are essentially zero or very few bones
+                    if (bones.length > 0) {
+                        let nearestBoneIdx = 0;
+                        let minDist = Infinity;
+                        bones.forEach((bData, bIdx) => {
+                            const dist = vertexWorldPos.distanceTo(bData.mesh.position);
+                            if (dist < minDist) {
+                                minDist = dist;
+                                nearestBoneIdx = bIdx;
+                            }
+                        });
+                        // Clear existing topWeights and add the nearest one
+                        topWeights.length = 0; 
+                        topWeights.push({ boneIndex: nearestBoneIdx, weight: 1.0 });
+                    }
+                }
+                
+                while (topWeights.length < 4) {
+                    topWeights.push({ boneIndex: topWeights.length > 0 ? topWeights[0].boneIndex : 0, weight: 0.0 });
+                }
+                return topWeights.slice(0, 4);
+            }
+
+            updateAnimationDuration() { 
+                if (!this.currentAnim || !this.animations[this.currentAnim]) return;
+                
+                const newDurationInput = document.getElementById('animDuration');
+                const newDuration = parseFloat(newDurationInput.value);
+
+                if (isNaN(newDuration) || newDuration <= 0.01) { // Ensure duration is positive and sensible
+                    console.warn("Invalid animation duration. Must be a positive number.");
+                    newDurationInput.value = this.animations[this.currentAnim].duration.toFixed(1); // Reset to old value
+                    return;
+                }
+
+                this.animations[this.currentAnim].duration = newDuration;
+                
+                if (this.currentTime > newDuration) {
+                    this.currentTime = newDuration; // Cap current time to new duration
+                }
+                
+                document.getElementById('timeSlider').value = (this.currentTime / newDuration * 100);
+                this.updateKeyframeDisplay(); // Re-calculate keyframe positions on timeline
+                this.updateScrubberPosition(); // Update scrubber position
+                
+                console.log(`Animation '${this.currentAnim}' duration updated to ${newDuration.toFixed(2)}s.`);
+            };
         }
         
         let rig;
@@ -1192,6 +1343,7 @@
         function pauseAnimation() { rig.pauseAnimation(); }
         function setKeyframe() { rig.setKeyframe(); }
         function deleteKeyframe() { rig.deleteKeyframe(); }
+        function updateAnimationDuration() { rig.updateAnimationDuration(); }
 
         function toggleUIVisibility() { rig.toggleUIVisibility(); }
         function setTransformMode(mode) { rig.setTransformMode(mode); }
