@@ -775,8 +775,8 @@
             
             updateAnimSelect() {
                 const select = document.getElementById('animSelect');
-                const currentVal = select.value;
-                select.innerHTML = '<option value="">Select Animation</option>';
+                const currentVal = select.value; // Preserve current selection if possible
+                select.innerHTML = '<option value="">Select Animation</option>'; // Clear and add default
                 
                 Object.keys(this.animations).forEach(name => {
                     const option = document.createElement('option');
