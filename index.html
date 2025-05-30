@@ -37,7 +37,7 @@
         <div id="ui">
             <div class="panel">
                 <h3>Model Controls</h3>
-                <input type="file" id="modelFile" accept=".obj,.gltf,.glb">
+                <input type="file" id="modelFile" accept=".obj,.fbx,.gltf,.glb">
                 <button onclick="loadDefaultModel()">Load Cube</button>
                 <button onclick="toggleWireframe()">Toggle Wireframe</button>
                 <div class="info">Click and drag to orbit camera<br>Scroll to zoom</div>
@@ -50,8 +50,8 @@
                 <select id="boneSelect"><option>Select Bone</option></select>
                 <button onclick="deleteBone()">Delete Bone</button>
                 <div class="info">
-                    <strong>Bone Mode ON:</strong> Click on model to add new bones. Click an existing bone to select it as the parent for the next bone you create.<br>
-                    <strong>Bone Mode OFF:</strong> Click a bone to select it. The 'Transform Tools' panel below will become active, allowing you to pose the selected bone using on-screen gizmos.
+                    Bone Mode ON: Click on model to create bones.<br>
+                    Bone Mode OFF: Click bone to select & transform.
                 </div>
             </div>
 
@@ -59,11 +59,7 @@
                 <h3>Transform Tools</h3>
                 <button id="translateModeButton" onclick="setTransformMode('translate')">Translate</button>
                 <button id="rotateModeButton" onclick="setTransformMode('rotate')">Rotate</button>
-                <div class="info">
-                    Active when 'Bone Mode' is OFF and a bone is selected.<br>
-                    Use the on-screen gizmos (visual handles) to translate or rotate the selected bone.<br>
-                    Click the buttons above to switch between Translate and Rotate gizmos.
-                </div>
+                <div class="info">Use gizmos to move/rotate selected bone (Bone Mode OFF).</div>
             </div>
             
             <div class="panel">
@@ -143,7 +139,6 @@
                 this.renderer.setSize(window.innerWidth, window.innerHeight);
                 this.renderer.setClearColor(0x333333);
                 this.renderer.shadowMap.enabled = true;
-                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
                 document.getElementById('container').appendChild(this.renderer.domElement);
                 
                 this.updateCameraPosition();
@@ -373,7 +368,6 @@
             
             loadDefaultModel() {
                 if (this.model) this.scene.remove(this.model);
-                this.clearSkeleton(); // Ensure skeleton and controls are reset
                 
                 const geometry = new THREE.BoxGeometry(2, 3, 1); 
                 const material = new THREE.MeshLambertMaterial({ color: 0x8888ff });
@@ -382,7 +376,7 @@
                 this.model.castShadow = true;
                 this.model.receiveShadow = true;
                 this.scene.add(this.model);
-                console.log('Loaded default cube model and cleared existing skeleton.');
+                console.log('Loaded default cube model.');
             }
             
             toggleBoneMode() {
@@ -602,7 +596,9 @@
                     } else { // Model itself is a mesh
                          this.meshToSkin = this.model;
                     }
-
+                } else if (this.model && this.model.isMesh) {
+                     this.meshToSkin = this.model;
+                }
 
                 if (!this.meshToSkin || !this.bones.length) {
                      console.error("Cannot create skinned mesh: Requirements not met (meshToSkin or bones missing).");
@@ -627,10 +623,9 @@
                 // For now, use class property autoSkinInfluenceRadius, which could be set based on model bounds later
                 const modelBox = new THREE.Box3().setFromObject(this.meshToSkin);
                 const modelSize = modelBox.getSize(new THREE.Vector3());
-                const adaptiveInfluenceRadius = Math.max(modelSize.x, modelSize.y, modelSize.z) * 0.25; // e.g., 25% of max dimension
+                const adaptiveInfluenceRadius = Math.max(modelSize.x, modelSize.y, modelSize.z) * 0.35; // Increased slightly for potentially better coverage
                 const influenceRadius = adaptiveInfluenceRadius > 0.01 ? adaptiveInfluenceRadius : this.autoSkinInfluenceRadius;
                 console.log("Using influence radius for auto-skinning:", influenceRadius.toFixed(3));
-
 
                 for (let i = 0; i < numVertices; i++) {
                     vertex.fromBufferAttribute(positionAttribute, i);
@@ -705,9 +700,15 @@
                 // 6. Add root THREE.Bones to SkinnedMesh and set their initial local transforms
                 this.bones.forEach((boneData, i) => {
                     const threeBone = threeBones[i];
-                    // Set initial local transform of THREE.Bone based on its world pos/quat (from boneData.mesh)
+                    // Set initial local transform of THREE.Bone based on its world pos/quat (from boneData.position/quaternion)
                     // relative to its parent THREE.Bone or the SkinnedMesh if it's a root.
-                    const boneWorldMatrix = new THREE.Matrix4().compose(boneData.mesh.position, boneData.mesh.quaternion, boneData.mesh.scale);
+                    // Use boneData.position and boneData.quaternion which are the canonical world transforms.
+                    // Explicitly use unit scale for the THREE.Bone's matrix construction.
+                    const boneWorldMatrix = new THREE.Matrix4().compose(
+                        boneData.position, 
+                        boneData.quaternion, 
+                        new THREE.Vector3(1, 1, 1) // Use unit scale
+                    );
                     
                     if (boneData.parent) {
                         const parentThreeBone = boneMap.get(boneData.parent.id);
@@ -1039,6 +1040,7 @@
 
                 boneData.mesh.position.copy(boneData.position);
                 boneData.mesh.quaternion.copy(boneData.quaternion);
+                // boneData.mesh.scale should ideally remain (1,1,1) for visual helpers
 
                 this.updateBoneConnectionLines(boneData);
 
@@ -1048,7 +1050,13 @@
                     const threeBone = this.skeleton.bones[boneIndex];
 
                     if (threeBone) {
-                        const targetWorldMatrix = new THREE.Matrix4().compose(boneData.mesh.position, boneData.mesh.quaternion, boneData.mesh.scale);
+                        // Use boneData.position and boneData.quaternion (canonical world transforms)
+                        // and explicit unit scale for the target world matrix of the THREE.Bone.
+                        const targetWorldMatrix = new THREE.Matrix4().compose(
+                            boneData.position, 
+                            boneData.quaternion, 
+                            new THREE.Vector3(1, 1, 1) // Use unit scale
+                        );
 
                         if (boneData.parent) {
                             const parentBoneData = boneData.parent;
@@ -1061,7 +1069,7 @@
                                     threeBone.matrix.multiplyMatrices(parentInverseWorldMatrix, targetWorldMatrix);
                                 }
                             }
-                        } else { 
+                        } else { // Root bone
                             this.model.updateMatrixWorld(true); 
                             const modelInverseWorldMatrix = new THREE.Matrix4().copy(this.model.matrixWorld).invert();
                             threeBone.matrix.multiplyMatrices(modelInverseWorldMatrix, targetWorldMatrix);
@@ -1316,8 +1324,7 @@
                 this.updateScrubberPosition(); // Update scrubber position
                 
                 console.log(`Animation '${this.currentAnim}' duration updated to ${newDuration.toFixed(2)}s.`);
-            }
-
+            };
         }
         
         let rig;
